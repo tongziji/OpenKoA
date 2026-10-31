@@ -1,0 +1,12 @@
+# Disable autocrlf on generated files, they always generate with LF
+# Add any extra files or paths here to make git stop saying they
+# are changed when only line endings change.
+src/generated/**/.cache/cache text eol=lf
+src/generated/**/*.json text eol=lf
+
+# Shell 脚本必须保持 LF，否则在 Git Bash / WSL 下执行会报 $'\r': command not found
+gradlew text eol=lf
+*.sh text eol=lf
+# Windows 批处理保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

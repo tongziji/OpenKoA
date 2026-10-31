@@ -1,0 +1,845 @@
+package client.openkoa.gui.openkoa;
+
+import java.util.List;
+import net.minecraft.client.gui.GuiGraphics;
+import client.openkoa.gui.openkoa.OpenKoALayout.Rect;
+import client.openkoa.gui.openkoa.OpenKoALayout.Viewport;
+import client.openkoa.gui.openkoa.OpenKoATheme.Palette;
+import client.openkoa.render.DrawContext;
+import client.openkoa.render.FontPresets;
+import client.openkoa.render.FontRenderer;
+import client.openkoa.render.Fonts;
+import client.openkoa.render.GlHelper;
+import client.openkoa.render.GlyphMetrics;
+import client.openkoa.render.Paint;
+import client.openkoa.render.RoundedRectangle;
+import client.openkoa.utils.render.RenderUtil;
+
+import static client.openkoa.gui.openkoa.OpenKoALayout.*;
+
+/**
+ * Immediate-mode painter for the OpenKoA click GUI.
+ *
+ * <p>Geometry comes from {@link OpenKoALayout}, colours from {@link OpenKoATheme.Palette}. Window
+ * chrome and panes all run through the same surface so a theme switch only swaps the
+ * palette.
+ */
+public final class OpenKoARenderer {
+    public enum Kind { SWITCH, SLIDER, SELECT, SEGMENTED, KEYBIND, LIST, BUTTON, INPUT }
+
+    /**
+     * Real font weights, the same triple the Neverlose GUI uses, plus the rasteriser's ascent/em
+     * ratio measured from each face.
+     *
+     * <p>The metrics object reports the glyph cell from the font's own ascent, while glyphs are
+     * rasterised with {@code Graphics2D}'s ascent, so the two have to be reconciled when centring.
+     */
+    private enum Face {
+        REGULAR(1.115f), MEDIUM(1.05f), BOLD(1.05f);
+
+        private final float rasterAscent;
+
+        Face(float rasterAscent) {
+            this.rasterAscent = rasterAscent;
+        }
+
+        FontRenderer of(float size, float rasterScale) {
+            return switch (this) {
+                case REGULAR -> FontPresets.poppinsRegular(size, rasterScale);
+                case MEDIUM -> FontPresets.poppinsMedium(size, rasterScale);
+                case BOLD -> FontPresets.poppinsBold(size, rasterScale);
+            };
+        }
+    }
+
+    public record Editor(String value, boolean focused) {
+    }
+
+    public record Nav(String label, int count, int icon, boolean active, boolean hovered) {
+    }
+
+    public record Note(Rect bounds, String title, String sub, boolean enabled, boolean selected,
+                       boolean hovered, float toggle) {
+    }
+
+    public record Pill(Rect bounds, String label, boolean active) {
+    }
+
+    public record Row(Kind kind, Rect bounds, Rect control, Rect valueBox, String label, String value,
+                      float progress, boolean hovered, boolean editing, List<Pill> pills) {
+    }
+
+    public record Group(Rect bounds, String title, List<Row> rows) {
+    }
+
+    public record Detail(Rect head, Rect toggle, String title, String sub, float progress, List<Group> groups) {
+    }
+
+    public record MenuOption(String label, boolean selected, boolean highlighted) {
+    }
+
+    public record Menu(Rect bounds, float reveal, List<MenuOption> options) {
+    }
+
+    public record Chrome(String title, boolean focused, boolean maximized, int hoverDot) {
+    }
+
+    public record PaneRow(Kind kind, Rect bounds, Rect control, String label, String value, float progress,
+                          boolean hovered, boolean active, boolean editing, List<Pill> pills) {
+    }
+
+    public record Pane(Viewport viewport, float opacity, float openingScale, Chrome chrome, Palette palette,
+                       boolean dark, List<PaneRow> rows, float mouseX, float mouseY) {
+    }
+
+    public record Frame(Viewport viewport, float opacity, float openingScale, Chrome chrome, float selectionY,
+                        Palette palette, boolean dark, String navLabel, List<Nav> nav, List<Nav> footer,
+                        Editor search, String listTitle, List<Note> notes, float listScroll, float listMax,
+                        Detail detail, float detailScroll, float detailMax, Menu menu, float mouseX, float mouseY) {
+    }
+
+    private OpenKoARenderer() {
+    }
+
+    public static void paintModules(DrawContext dc, GuiGraphics gg, Frame frame) {
+        Viewport viewport = frame.viewport();
+        Palette palette = frame.palette();
+        dc.save();
+        try {
+            dc.translate(viewport.x() + WIDTH * viewport.scale() / 2, viewport.y() + HEIGHT * viewport.scale() / 2);
+            dc.scale(viewport.scale() * frame.openingScale(), viewport.scale() * frame.openingScale());
+            dc.translate(-WIDTH / 2, -HEIGHT / 2);
+
+            float screenScale = viewport.scale() * frame.openingScale();
+            Clipper clip = new Clipper(viewport, frame.openingScale());
+            Surface surface = new Surface(dc, clip, palette, frame.opacity(), frame.dark(),
+                    Fonts.deviceScale(viewport.scale()));
+
+            shell(surface, gg, frame, screenScale);
+
+            clip.push(new Rect(0, 0, SIDEBAR_W, HEIGHT));
+            surface.sidebar(frame);
+            clip.pop();
+
+            clip.push(new Rect(LIST_X, 0, LIST_W, HEIGHT));
+            surface.search(frame);
+            clip.push(LIST_VIEWPORT);
+            surface.notes(frame);
+            clip.pop();
+            if (frame.listMax() > 0) {
+                surface.scrollbar(LIST_VIEWPORT, frame.listScroll(), frame.listMax());
+            }
+            clip.pop();
+
+            clip.push(new Rect(DETAIL_X, 0, DETAIL_W, HEIGHT));
+            clip.push(DETAIL_VIEWPORT);
+            if (frame.detail() == null) {
+                surface.textCenter("Select a module", DETAIL_X + DETAIL_W / 2f, DETAIL_PAD_TOP + 70, Face.REGULAR,
+                        SZ_TITLE, palette.secondary, DETAIL_W - 40);
+            } else {
+                surface.detail(frame.detail());
+            }
+            clip.pop();
+            if (frame.detailMax() > 0) {
+                surface.scrollbar(DETAIL_VIEWPORT, frame.detailScroll(), frame.detailMax());
+            }
+            clip.pop();
+
+            if (frame.menu() != null) {
+                surface.menu(frame.menu());
+            }
+            surface.chrome(frame.chrome());
+        } finally {
+            dc.restore();
+        }
+    }
+
+    public static void paintPane(DrawContext dc, GuiGraphics gg, Pane pane) {
+        Viewport viewport = pane.viewport();
+        dc.save();
+        try {
+            dc.translate(viewport.x() + WIDTH * viewport.scale() / 2, viewport.y() + HEIGHT * viewport.scale() / 2);
+            dc.scale(viewport.scale() * pane.openingScale(), viewport.scale() * pane.openingScale());
+            dc.translate(-WIDTH / 2, -HEIGHT / 2);
+
+            float screenScale = viewport.scale() * pane.openingScale();
+            Clipper clip = new Clipper(viewport, pane.openingScale());
+            Surface surface = new Surface(dc, clip, pane.palette(), pane.opacity(), pane.dark(),
+                    Fonts.deviceScale(viewport.scale()));
+            Rect screenWindow = viewport.screen(WINDOW, pane.openingScale());
+            RenderUtil.drawBlurredRect(gg.pose(), screenWindow.x(), screenWindow.y(), screenWindow.width(),
+                    screenWindow.height(), RADIUS * screenScale, Math.max(4f, OpenKoATheme.Effects.BLUR * screenScale),
+                    Math.min(1f, pane.opacity()), 0xFF000000);
+            surface.shadow(WINDOW, RADIUS, pane.palette().shadow, OpenKoATheme.Effects.SHADOW_OFFSET,
+                    OpenKoATheme.Effects.SHADOW_BLUR);
+            surface.rounded(WINDOW, RADIUS, pane.palette().window);
+            surface.corners(new Rect(0, CONTENT_TOP, WIDTH, HEIGHT - CONTENT_TOP), 0, 0, RADIUS, RADIUS,
+                    pane.palette().detail);
+            surface.border(WINDOW, RADIUS, pane.palette().hairline);
+
+            clip.push(new Rect(0, CONTENT_TOP, WIDTH, HEIGHT - CONTENT_TOP));
+            for (PaneRow row : pane.rows()) {
+                surface.paneRow(row);
+            }
+            clip.pop();
+            surface.chrome(pane.chrome());
+        } finally {
+            dc.restore();
+        }
+    }
+
+    private static void shell(Surface surface, GuiGraphics gg, Frame frame, float screenScale) {
+        Rect screenWindow = frame.viewport().screen(WINDOW, frame.openingScale());
+        RenderUtil.drawBlurredRect(gg.pose(), screenWindow.x(), screenWindow.y(), screenWindow.width(),
+                screenWindow.height(), RADIUS * screenScale, Math.max(4f, OpenKoATheme.Effects.BLUR * screenScale),
+                Math.min(1f, frame.opacity()), 0xFF000000);
+        surface.shadow(WINDOW, RADIUS, frame.palette().shadow, OpenKoATheme.Effects.SHADOW_OFFSET,
+                OpenKoATheme.Effects.SHADOW_BLUR);
+        surface.rounded(WINDOW, RADIUS, frame.palette().window);
+
+        surface.corners(new Rect(0, CONTENT_TOP, SIDEBAR_W, HEIGHT - CONTENT_TOP), 0, 0, 0, RADIUS,
+                frame.palette().sidebar);
+        surface.rounded(new Rect(LIST_X, CONTENT_TOP, LIST_W, HEIGHT - CONTENT_TOP), 0, frame.palette().list);
+        surface.corners(new Rect(DETAIL_X, CONTENT_TOP, DETAIL_W, HEIGHT - CONTENT_TOP), 0, 0, RADIUS, 0,
+                frame.palette().detail);
+        surface.rounded(new Rect(SIDEBAR_W - .5f, CONTENT_TOP, 1, HEIGHT - CONTENT_TOP), 0,
+                frame.palette().separator);
+        surface.rounded(new Rect(DETAIL_X - .5f, CONTENT_TOP, 1, HEIGHT - CONTENT_TOP), 0,
+                frame.palette().separator);
+        surface.border(WINDOW, RADIUS, frame.palette().hairline);
+    }
+
+    /**
+     * Scissor helper that maps local window coordinates to the screen.
+     *
+     * <p>Delegates to {@link RenderUtil}, whose stack already intersects nested rectangles and
+     * restores the parent scope, so nesting here is safe.
+     */
+    static final class Clipper {
+        private final Viewport viewport;
+        private final float openingScale;
+
+        Clipper(Viewport viewport, float openingScale) {
+            this.viewport = viewport;
+            this.openingScale = openingScale;
+        }
+
+        void push(Rect local) {
+            if (viewport == null) {
+                return;
+            }
+            Rect screen = viewport.screen(local, openingScale);
+            int minX = (int) Math.floor(screen.x()), minY = (int) Math.floor(screen.y());
+            int width = (int) Math.ceil(screen.right()) - minX, height = (int) Math.ceil(screen.bottom()) - minY;
+            RenderUtil.pushScissor(minX, minY, Math.max(0, width), Math.max(0, height));
+        }
+
+        void pop() {
+            if (viewport == null) {
+                return;
+            }
+            RenderUtil.popScissor();
+        }
+    }
+
+    private static final class Surface {
+        private final DrawContext dc;
+        private final Clipper clip;
+        private final Palette palette;
+        private final float globalAlpha;
+        private final boolean dark;
+        private final float rasterScale;
+
+        Surface(DrawContext dc, Clipper clip, Palette palette, float globalAlpha, boolean dark, float rasterScale) {
+            this.dc = dc;
+            this.clip = clip;
+            this.palette = palette;
+            this.globalAlpha = globalAlpha;
+            this.dark = dark;
+            this.rasterScale = rasterScale;
+        }
+
+        private int col(int color) {
+            int a = (int) (((color >>> 24) * globalAlpha) + .5f);
+            return (a << 24) | (color & 0xFFFFFF);
+        }
+
+        /**
+         * Top edge to hand to the text renderer so that the glyphs' capital centre lands on
+         * {@code centerY}. Walked through the glyph pipeline: the atlas cell starts at
+         * {@code y + ceil((lineGap - ascent - descent) / 2) + ascent - 1} and the baseline sits
+         * {@code rasterAscent * size / 2} into the cell.
+         */
+        private float textTop(Face face, FontRenderer font, float size, float centerY) {
+            GlyphMetrics metrics = font.getMetrics();
+            float ascent = metrics.ascent();
+            float fontAscent = (float) Math.ceil((metrics.getLineGap() - ascent - metrics.descent()) / 2f);
+            return centerY - fontAscent - ascent + 1f - face.rasterAscent * size / 2f + metrics.capHeight() / 2f;
+        }
+
+        void text(String value, float x, float centerY, Face face, float size, int color, float maxWidth) {
+            if (value == null || value.isEmpty()) {
+                return;
+            }
+            FontRenderer font = face.of(size, this.rasterScale);
+            String shown = maxWidth > 0 ? elide(value, font, maxWidth) : value;
+            GlHelper.drawText(shown, x, textTop(face, font, size, centerY), font, col(color));
+        }
+
+        void textRight(String value, float right, float centerY, Face face, float size, int color, float maxWidth) {
+            if (value == null || value.isEmpty()) {
+                return;
+            }
+            FontRenderer font = face.of(size, this.rasterScale);
+            String shown = maxWidth > 0 ? elide(value, font, maxWidth) : value;
+            GlHelper.drawText(shown, right - GlHelper.getStringWidth(shown, font), textTop(face, font, size, centerY),
+                    font, col(color));
+        }
+
+        void textCenter(String value, float centerX, float centerY, Face face, float size, int color, float maxWidth) {
+            if (value == null || value.isEmpty()) {
+                return;
+            }
+            FontRenderer font = face.of(size, this.rasterScale);
+            String shown = maxWidth > 0 ? elide(value, font, maxWidth) : value;
+            GlHelper.drawText(shown, centerX - GlHelper.getStringWidth(shown, font) / 2f,
+                    textTop(face, font, size, centerY), font, col(color));
+        }
+
+        float width(String value, Face face, float size) {
+            return GlHelper.getStringWidth(value, face.of(size, this.rasterScale));
+        }
+
+        String elide(String value, FontRenderer font, float width) {
+            if (width <= 0 || GlHelper.getStringWidth(value, font) <= width) {
+                return value;
+            }
+            int end = value.length();
+            while (end > 0 && GlHelper.getStringWidth(value.substring(0, end) + "...", font) > width) {
+                end = value.offsetByCodePoints(end, -1);
+            }
+            return value.substring(0, end).stripTrailing() + "...";
+        }
+
+        void rounded(Rect bounds, float radius, int color) {
+            if (bounds.height() <= 0 || bounds.width() <= 0 || (color >>> 24) == 0) {
+                return;
+            }
+            dc.drawRoundedRect(RoundedRectangle.ofXYWHR(bounds.x(), bounds.y(), bounds.width(), bounds.height(), radius),
+                    new Paint().setColor(col(color)));
+        }
+
+        void corners(Rect bounds, float topLeft, float topRight, float bottomRight, float bottomLeft, int color) {
+            dc.drawRoundedRect(RoundedRectangle.ofXYWHRadii(bounds.x(), bounds.y(), bounds.width(), bounds.height(),
+                            new float[]{topLeft, topRight, bottomRight, bottomLeft}),
+                    new Paint().setColor(col(color)));
+        }
+
+        void border(Rect bounds, float radius, int color) {
+            if (bounds.height() <= 0 || bounds.width() <= 0) {
+                return;
+            }
+            Paint paint = new Paint().setColor(col(color)).setStrokeCap(Paint.StrokeCap.STROKE).setStrokeWidth(1f);
+            dc.drawRoundedRect(RoundedRectangle.ofXYWHR(bounds.x() + .5f, bounds.y() + .5f,
+                    bounds.width() - 1, bounds.height() - 1, Math.max(0, radius - .5f)), paint);
+        }
+
+        void circle(float x, float y, float radius, int color) {
+            rounded(new Rect(x - radius, y - radius, radius * 2, radius * 2), radius, color);
+        }
+
+        /** Antialiased round-capped stroke: a capsule drawn as a rotated rounded rect. */
+        void stroke(float x1, float y1, float x2, float y2, float width, int color) {
+            float dx = x2 - x1, dy = y2 - y1;
+            float length = (float) Math.sqrt(dx * dx + dy * dy);
+            if (length < .01f) {
+                circle(x1, y1, width / 2f, color);
+                return;
+            }
+            dc.save();
+            dc.translate((x1 + x2) / 2f, (y1 + y2) / 2f);
+            dc.rotate((float) Math.toDegrees(Math.atan2(dy, dx)));
+            dc.drawRoundedRect(RoundedRectangle.ofXYWHR(-length / 2f, -width / 2f, length, width, width / 2f),
+                    new Paint().setColor(col(color)));
+            dc.restore();
+        }
+
+        void ring(float cx, float cy, float radius, float width, int color) {
+            int segments = Math.max(12, Math.round(radius * 2.6f));
+            float step = (float) (Math.PI * 2 / segments);
+            float px = cx + radius, py = cy;
+            for (int i = 1; i <= segments; i++) {
+                double angle = step * i;
+                float nx = cx + (float) Math.cos(angle) * radius, ny = cy + (float) Math.sin(angle) * radius;
+                stroke(px, py, nx, ny, width, color);
+                px = nx;
+                py = ny;
+            }
+        }
+
+        void shadow(Rect bounds, float radius, int color, float offsetY, float blur) {
+            int layers = 16;
+            int baseA = color >>> 24;
+            for (int i = layers; i >= 1; i--) {
+                float t = (float) i / layers;
+                float spread = blur * t;
+                int a = Math.max(1, Math.round(baseA * (1f - t) / layers * 2.6f));
+                rounded(new Rect(bounds.x() - spread, bounds.y() - spread + offsetY * t,
+                                bounds.width() + spread * 2, bounds.height() + spread * 2),
+                        radius + spread, (a << 24) | (color & 0xFFFFFF));
+            }
+        }
+
+        // -- window chrome --------------------------------------------------------
+
+        void chrome(Chrome chrome) {
+            corners(new Rect(0, 0, WIDTH, TITLEBAR_H), RADIUS, RADIUS, 0, 0, palette.chrome);
+            for (int i = 0; i < 3; i++) {
+                Rect dot = trafficLight(i);
+                float cx = dot.x() + dot.width() / 2f, cy = dot.y() + dot.height() / 2f;
+                int color = !chrome.focused() ? palette.controlIdle
+                        : i == 0 ? palette.close : i == 1 ? palette.minimize : palette.maximize;
+                circle(cx, cy, dot.width() / 2f, color);
+                if (chrome.hoverDot() == i) {
+                    trafficGlyph(i, cx, cy);
+                }
+            }
+            textCenter(chrome.title(), WIDTH / 2f, TITLEBAR_H / 2f, Face.MEDIUM, SZ_BODY,
+                    chrome.focused() ? palette.titleFocused : palette.titleIdle, WIDTH * .6f);
+        }
+
+        private void trafficGlyph(int index, float cx, float cy) {
+            int color = palette.controlGlyph;
+            switch (index) {
+                case 0 -> {
+                    stroke(cx - 2.6f, cy - 2.6f, cx + 2.6f, cy + 2.6f, 1.5f, color);
+                    stroke(cx - 2.6f, cy + 2.6f, cx + 2.6f, cy - 2.6f, 1.5f, color);
+                }
+                case 1 -> stroke(cx - 3, cy, cx + 3, cy, 1.5f, color);
+                default -> {
+                    stroke(cx - 3, cy, cx + 3, cy, 1.5f, color);
+                    stroke(cx, cy - 3, cx, cy + 3, 1.5f, color);
+                }
+            }
+        }
+
+        // -- widgets --------------------------------------------------------------
+
+        void toggle(Rect bounds, float progress) {
+            rounded(bounds, bounds.height() / 2f, blend(palette.switchOff, palette.switchOn, progress));
+            float radius = SWITCH_KNOB / 2f;
+            float travel = bounds.width() - SWITCH_PAD * 2 - SWITCH_KNOB;
+            float x = bounds.x() + SWITCH_PAD + radius + progress * travel;
+            float y = bounds.y() + bounds.height() / 2f;
+            circle(x, y + 1.5f, radius + 1.5f, OpenKoATheme.Effects.KNOB_SHADOW);
+            circle(x, y, radius, palette.switchKnob);
+        }
+
+        void slider(Rect track, float progress, boolean active) {
+            float centerY = track.y() + track.height() / 2f;
+            float barY = centerY - SLIDER_TRACK / 2f;
+            float knobX = track.x() + SLIDER_KNOB / 2f + progress * (track.width() - SLIDER_KNOB);
+            rounded(new Rect(track.x(), barY, track.width(), SLIDER_TRACK), SLIDER_TRACK / 2f, palette.field);
+            if (progress > 0) {
+                rounded(new Rect(track.x(), barY, track.width() * progress, SLIDER_TRACK), SLIDER_TRACK / 2f,
+                        palette.accent);
+            }
+            circle(knobX, centerY + 1f, SLIDER_KNOB / 2f + 1.5f, OpenKoATheme.Effects.KNOB_SHADOW);
+            circle(knobX, centerY, SLIDER_KNOB / 2f + (active ? .6f : 0), palette.switchKnob);
+        }
+
+        void selectBox(Rect bounds, String value) {
+            rounded(bounds, SELECT_RADIUS, palette.field);
+            text(value, bounds.x() + SELECT_PAD_LEFT, bounds.y() + bounds.height() / 2f, Face.REGULAR, SZ_BODY,
+                    palette.text, bounds.width() - SELECT_PAD_LEFT - SELECT_PAD_RIGHT);
+            float cx = bounds.right() - 9 - SELECT_CHEVRON / 2f;
+            float cy = bounds.y() + bounds.height() / 2f;
+            stroke(cx - 3.4f, cy - 1.6f, cx, cy + 1.8f, 1.55f, palette.secondary);
+            stroke(cx, cy + 1.8f, cx + 3.4f, cy - 1.6f, 1.55f, palette.secondary);
+        }
+
+        void segmented(Rect bounds, List<Pill> pills) {
+            rounded(bounds, SEGMENT_RADIUS, palette.field);
+            for (Pill pill : pills) {
+                if (pill.active()) {
+                    rounded(new Rect(pill.bounds().x(), pill.bounds().y() + 1, pill.bounds().width(),
+                            pill.bounds().height()), SEGMENT_BTN_RADIUS, 0x24000000);
+                    rounded(pill.bounds(), SEGMENT_BTN_RADIUS, palette.segmentActive);
+                }
+                textCenter(pill.label(), pill.bounds().x() + pill.bounds().width() / 2f,
+                        pill.bounds().y() + pill.bounds().height() / 2f, pill.active() ? Face.MEDIUM : Face.REGULAR,
+                        SZ_BODY, palette.text, pill.bounds().width() - 6);
+            }
+        }
+
+        // -- panes ----------------------------------------------------------------
+
+        void sidebar(Frame frame) {
+            text(frame.navLabel(), SIDE_PAD_X + NAV_LABEL_PAD_X, NAV_LABEL_CENTER, Face.MEDIUM,
+                    SZ_SMALL, palette.secondary, SIDEBAR_W - 40);
+            rounded(new Rect(SIDE_PAD_X, frame.selectionY(), SIDEBAR_W - SIDE_PAD_X * 2, NAV_H),
+                    NAV_RADIUS, palette.accentSoft);
+            for (int i = 0; i < frame.nav().size(); i++) {
+                Nav nav = frame.nav().get(i);
+                navRow(navItem(i), nav, true);
+            }
+            for (int i = 0; i < frame.footer().size(); i++) {
+                navRow(footerItem(i), frame.footer().get(i), false);
+            }
+        }
+
+        private void navRow(Rect bounds, Nav nav, boolean withCount) {
+            if (nav.hovered() && !nav.active()) {
+                rounded(bounds, NAV_RADIUS, palette.navHover);
+            }
+            float centerY = bounds.y() + bounds.height() / 2f;
+            icon(nav.icon(), bounds.x() + NAV_PAD + NAV_ICON / 2f, centerY, 19,
+                    nav.active() ? palette.accent : palette.text);
+            text(nav.label(), bounds.x() + NAV_PAD + NAV_ICON + NAV_ICON_GAP, centerY,
+                    nav.active() ? Face.MEDIUM : Face.REGULAR, SZ_NAV,
+                    nav.active() ? palette.accent : palette.text,
+                    bounds.width() - NAV_PAD * 2 - NAV_ICON - NAV_ICON_GAP - 26);
+            if (withCount) {
+                textRight(Integer.toString(nav.count()), bounds.right() - NAV_PAD, centerY, Face.REGULAR, SZ_COUNT,
+                        palette.secondary, bounds.width());
+            }
+        }
+
+        void search(Frame frame) {
+            Rect box = searchBox();
+            rounded(box, OpenKoATheme.Radius.CONTROL, palette.field);
+            float ix = box.x() + SEARCH_INNER_PAD;
+            float iy = box.y() + (box.height() - SEARCH_ICON) / 2f;
+            float k = SEARCH_ICON / 20f;
+            ring(ix + 9 * k, iy + 9 * k, 5.4f * k, 1.7f * k, palette.secondary);
+            stroke(ix + 13.2f * k, iy + 13.2f * k, ix + 16.5f * k, iy + 16.5f * k, 1.7f * k, palette.secondary);
+            float cy = iy + SEARCH_ICON / 2f;
+            float textX = box.x() + SEARCH_INNER_PAD + SEARCH_ICON + SEARCH_ICON_GAP;
+            float textMax = box.right() - SEARCH_INNER_PAD - textX;
+            Editor editor = frame.search();
+            if (editor.value().isEmpty()) {
+                text("Search", textX, cy, Face.REGULAR, SZ_BODY, palette.secondary, textMax);
+            } else {
+                text(editor.value(), textX, cy, Face.REGULAR, SZ_BODY, palette.text, textMax);
+            }
+            if (editor.focused() && System.nanoTime() / 500_000_000 % 2 == 0) {
+                FontRenderer font = Face.REGULAR.of(SZ_BODY, this.rasterScale);
+                float caret = textX + GlHelper.getStringWidth(editor.value(), font) + 1.5f;
+                stroke(caret, cy - 8, caret, cy + 8, 1.4f, palette.accent);
+            }
+        }
+
+        void notes(Frame frame) {
+            if (frame.notes().isEmpty()) {
+                textCenter("No results", LIST_X + LIST_W / 2f, LIST_TOP + LIST_PAD_TOP + 70 + 8.4f, Face.REGULAR,
+                        SZ_LABEL, palette.secondary, LIST_W - 40);
+                return;
+            }
+            text(frame.listTitle(), LIST_X + LIST_PAD_X + GROUP_TITLE_PAD_X, LIST_GROUP_TITLE_CENTER,
+                    Face.MEDIUM, SZ_GROUP, palette.secondary, LIST_CONTENT_W - GROUP_TITLE_PAD_X * 2);
+            for (Note note : frame.notes()) {
+                Rect bounds = note.bounds();
+                if (bounds.bottom() < LIST_TOP || bounds.y() > HEIGHT) {
+                    continue;
+                }
+                if (note.selected()) {
+                    rounded(bounds, NOTE_RADIUS, palette.rowSelected);
+                } else if (note.hovered()) {
+                    rounded(bounds, NOTE_RADIUS, palette.rowHover);
+                }
+                float textX = bounds.x() + NOTE_PAD_X;
+                float textMax = bounds.width() - NOTE_PAD_X * 2 - SWITCH_W - NOTE_GAP;
+                text(note.title(), textX, noteTitleY(bounds), Face.MEDIUM, SZ_TITLE, palette.text, textMax);
+                text(note.sub(), textX, noteSubY(bounds), Face.REGULAR, SZ_BODY, palette.secondary, textMax);
+                toggle(rowSwitch(bounds), note.toggle());
+            }
+        }
+
+        void detail(Detail detail) {
+            Rect head = detail.head();
+            float titleX = head.x() + DOC_PAD_X;
+            float textMax = head.width() - DOC_PAD_X * 2 - SWITCH_W - 14;
+            text(detail.title(), titleX, docTitleY(head), Face.BOLD, SZ_DOC_TITLE, palette.text, textMax);
+            text(detail.sub(), titleX, docSubY(head), Face.REGULAR, SZ_BODY, palette.secondary, textMax);
+            toggle(detail.toggle(), detail.progress());
+            for (Group group : detail.groups()) {
+                if (group.bounds().y() > HEIGHT || group.bounds().bottom() < DETAIL_PAD_TOP) {
+                    continue;
+                }
+                float header = group.title().isEmpty() ? 0 : GROUP_TITLE_LINE + GROUP_TITLE_GAP;
+                if (header > 0) {
+                    text(group.title(), GROUP_X + GROUP_TITLE_GAP, group.bounds().y() + GROUP_TITLE_LINE / 2f,
+                            Face.BOLD, SZ_GROUP, palette.secondary, GROUP_W - GROUP_TITLE_GAP * 2);
+                }
+                Rect card = new Rect(group.bounds().x(), group.bounds().y() + header, GROUP_W,
+                        group.bounds().height() - header);
+                rounded(card, GROUP_RADIUS, palette.card);
+                border(card, GROUP_RADIUS, palette.separator);
+                clip.push(card);
+                for (Row row : group.rows()) {
+                    if (row.bounds().bottom() < DETAIL_PAD_TOP || row.bounds().y() > HEIGHT) {
+                        continue;
+                    }
+                    settingRow(row);
+                }
+                clip.pop();
+            }
+        }
+
+        void settingRow(Row row) {
+            Rect bounds = row.bounds();
+            float contentX = rowContentX();
+            float contentRight = bounds.right() - ROW_PAD_X;
+            float centerY = bounds.y() + bounds.height() / 2f;
+            switch (row.kind()) {
+                case SWITCH -> {
+                    text(row.label(), contentX, centerY, Face.REGULAR, SZ_LABEL, palette.text,
+                            contentRight - contentX - SWITCH_W - NOTE_GAP);
+                    toggle(row.control(), row.progress());
+                }
+                case SELECT -> {
+                    text(row.label(), contentX, centerY, Face.REGULAR, SZ_LABEL, palette.text,
+                            contentRight - contentX - row.control().width() - NOTE_GAP);
+                    if (row.editing()) {
+                        rounded(row.control(), SELECT_RADIUS, palette.selectEditing);
+                    }
+                    selectBox(row.control(), row.value());
+                }
+                case SLIDER -> {
+                    text(row.label(), contentX, bounds.y() + COL_PAD_TOP + ROW_LABEL_H / 2f, Face.REGULAR, SZ_LABEL,
+                            palette.text, row.valueBox().x() - contentX - 8);
+                    if (row.editing()) {
+                        textRight(row.value(), contentRight, bounds.y() + COL_PAD_TOP + ROW_LABEL_H / 2f,
+                                Face.REGULAR, SZ_BODY, palette.accent, row.valueBox().width());
+                        if (System.nanoTime() / 500_000_000 % 2 == 0) {
+                            FontRenderer font = Face.REGULAR.of(SZ_BODY, this.rasterScale);
+                            float caret = contentRight - GlHelper.getStringWidth(row.value(), font) - 2f;
+                            stroke(caret, bounds.y() + COL_PAD_TOP + 2, caret,
+                                    bounds.y() + COL_PAD_TOP + ROW_LABEL_H - 2, 1.4f, palette.accent);
+                        }
+                    } else {
+                        textRight(row.value(), contentRight, bounds.y() + COL_PAD_TOP + ROW_LABEL_H / 2f,
+                                Face.REGULAR, SZ_BODY, row.hovered() ? palette.accent : palette.secondary,
+                                row.valueBox().width());
+                    }
+                    slider(row.control(), row.progress(), row.hovered());
+                }
+                case SEGMENTED -> {
+                    text(row.label(), contentX, bounds.y() + COL_PAD_TOP + ROW_LABEL_H / 2f, Face.REGULAR, SZ_LABEL,
+                            palette.text, contentRight - contentX);
+                    segmented(row.control(), row.pills());
+                }
+                case KEYBIND -> {
+                    text(row.label(), contentX, centerY, Face.REGULAR, SZ_LABEL, palette.text,
+                            contentRight - contentX - row.control().width() - NOTE_GAP);
+                    rounded(row.control(), SELECT_RADIUS, row.editing() ? palette.accentSoft : palette.field);
+                    textCenter(row.value(), row.control().x() + row.control().width() / 2f, centerY,
+                            row.editing() ? Face.BOLD : Face.REGULAR, SZ_BODY,
+                            row.editing() ? palette.accent : palette.text, row.control().width() - 20);
+                }
+                default -> {
+                }
+            }
+        }
+
+        void paneRow(PaneRow row) {
+            Rect bounds = row.bounds();
+            float centerY = bounds.y() + bounds.height() / 2f;
+            float padX = 16;
+            float contentX = bounds.x() + padX;
+            float contentRight = bounds.right() - padX;
+            switch (row.kind()) {
+                case SEGMENTED -> {
+                    text(row.label(), contentX, bounds.y() + COL_PAD_TOP + ROW_LABEL_H / 2f, Face.REGULAR, SZ_LABEL,
+                            palette.text, contentRight - contentX);
+                    segmented(row.control(), row.pills());
+                }
+                case LIST -> {
+                    if (row.hovered()) {
+                        rounded(bounds, OpenKoATheme.Radius.ROW, palette.rowHover);
+                    }
+                    text(row.label(), contentX, centerY, row.active() ? Face.MEDIUM : Face.REGULAR, SZ_LABEL,
+                            row.active() ? palette.accent : palette.text, contentRight - contentX - 60);
+                    textRight(row.value(), contentRight, centerY, Face.REGULAR, SZ_COUNT, palette.secondary, 80);
+                }
+                case BUTTON -> {
+                    rounded(bounds, OpenKoATheme.Radius.CONTROL,
+                            row.hovered() ? palette.accent : palette.accentSoft);
+                    textCenter(row.label(), bounds.x() + bounds.width() / 2f, centerY, Face.MEDIUM, SZ_BODY,
+                            row.hovered() ? palette.switchKnob : palette.accent, bounds.width() - 16);
+                }
+                case INPUT -> {
+                    rounded(bounds, OpenKoATheme.Radius.CONTROL, palette.field);
+                    if (row.editing()) {
+                        border(bounds, OpenKoATheme.Radius.CONTROL, palette.accent);
+                    }
+                    String shown = row.value().isEmpty() ? row.label() : row.value();
+                    text(shown, contentX, centerY, Face.REGULAR, SZ_BODY,
+                            row.value().isEmpty() ? palette.secondary : palette.text, bounds.width() - padX * 2 - 4);
+                    if (row.editing() && System.nanoTime() / 500_000_000 % 2 == 0) {
+                        float caret = contentX + width(row.value(), Face.REGULAR, SZ_BODY) + 1.5f;
+                        stroke(caret, centerY - 8, caret, centerY + 8, 1.4f, palette.accent);
+                    }
+                }
+                default -> {
+                }
+            }
+        }
+
+        void scrollbar(Rect viewport, float scroll, float maximum) {
+            rounded(new Rect(viewport.right() - SCROLL_GUTTER + (SCROLL_GUTTER - SCROLL_KNOB) / 2f, viewport.y(),
+                    SCROLL_KNOB, viewport.height()), SCROLL_KNOB / 2f, dark ? 0x1AFFFFFF : 0x14000000);
+            rounded(thumb(scroll, maximum, viewport), SCROLL_KNOB / 2f, dark ? 0x59FFFFFF : 0x42000000);
+        }
+
+        void menu(Menu menu) {
+            Rect bounds = menu.bounds();
+            shadow(bounds, MENU_RADIUS, palette.shadow, OpenKoATheme.Effects.SHADOW_OFFSET,
+                    OpenKoATheme.Effects.SHADOW_BLUR);
+            rounded(bounds, MENU_RADIUS, palette.popover);
+            border(bounds, MENU_RADIUS, palette.separator);
+            clip.push(new Rect(bounds.x() + 1, bounds.y() + MENU_PAD, bounds.width() - 2,
+                    Math.max(0, (bounds.height() - MENU_PAD * 2) * menu.reveal())));
+            for (int i = 0; i < menu.options().size(); i++) {
+                MenuOption option = menu.options().get(i);
+                Rect item = new Rect(bounds.x() + MENU_PAD, bounds.y() + MENU_PAD + i * MENU_OPTION_H,
+                        bounds.width() - MENU_PAD * 2, MENU_OPTION_H);
+                if (option.highlighted()) {
+                    rounded(item, MENU_OPTION_RADIUS, palette.field);
+                }
+                text(option.label(), item.x() + 9, item.y() + MENU_OPTION_H / 2f,
+                        option.selected() ? Face.MEDIUM : Face.REGULAR, SZ_BODY, palette.text,
+                        item.width() - 9 - MENU_CHECK - 12);
+                if (option.selected()) {
+                    check(item.right() - 9 - MENU_CHECK / 2f, item.y() + MENU_OPTION_H / 2f, palette.accent);
+                }
+            }
+            clip.pop();
+        }
+
+        void check(float cx, float cy, int color) {
+            stroke(cx - 4, cy + .3f, cx - 1.45f, cy + 2.85f, 1.75f, color);
+            stroke(cx - 1.45f, cy + 2.85f, cx + 4, cy - 2.6f, 1.75f, color);
+        }
+
+        // -- icon set -------------------------------------------------------------
+
+        void icon(int type, float x, float y, float size, int color) {
+            float s = size / 22f;
+            float w = 1.55f * s;
+            switch (type) {
+                case 0 -> { // sword
+                    line(x, y, s, 17.5f, 4.5f, 9.5f, 12.5f, w, color);
+                    line(x, y, s, 7.7f, 10.7f, 11.3f, 14.3f, w, color);
+                    line(x, y, s, 9.5f, 12.5f, 7f, 15f, w, color);
+                    line(x, y, s, 6f, 14f, 8f, 16f, w, color);
+                }
+                case 1 -> { // four-way arrows
+                    line(x, y, s, 3, 11, 19, 11, w, color);
+                    line(x, y, s, 11, 3, 11, 19, w, color);
+                    line(x, y, s, 16, 8, 19, 11, w, color);
+                    line(x, y, s, 19, 11, 16, 14, w, color);
+                    line(x, y, s, 8, 6, 11, 3, w, color);
+                    line(x, y, s, 11, 3, 14, 6, w, color);
+                    line(x, y, s, 6, 8, 3, 11, w, color);
+                    line(x, y, s, 3, 11, 6, 14, w, color);
+                    line(x, y, s, 8, 16, 11, 19, w, color);
+                    line(x, y, s, 11, 19, 14, 16, w, color);
+                }
+                case 2 -> { // person
+                    ringAt(x, y, s, 11, 6.5f, 3.2f, w, color);
+                    curve(x, y, s, 4.5f, 18, 4.5f, 14.5f, 7.5f, 11, 11, 11, w, color);
+                    curve(x, y, s, 11, 11, 14.5f, 11, 17.5f, 14.5f, 17.5f, 18, w, color);
+                }
+                case 3 -> { // isometric cube
+                    line(x, y, s, 11, 2.9f, 18.1f, 6.7f, w, color);
+                    line(x, y, s, 18.1f, 6.7f, 18.1f, 15.3f, w, color);
+                    line(x, y, s, 18.1f, 15.3f, 11, 19.1f, w, color);
+                    line(x, y, s, 11, 19.1f, 3.9f, 15.3f, w, color);
+                    line(x, y, s, 3.9f, 15.3f, 3.9f, 6.7f, w, color);
+                    line(x, y, s, 3.9f, 6.7f, 11, 2.9f, w, color);
+                    line(x, y, s, 3.9f, 6.7f, 11, 10.4f, w, color);
+                    line(x, y, s, 11, 10.4f, 18.1f, 6.7f, w, color);
+                    line(x, y, s, 11, 10.4f, 11, 19.1f, w, color);
+                }
+                case 4 -> { // globe
+                    ringAt(x, y, s, 11, 11, 8, w, color);
+                    line(x, y, s, 3, 11, 19, 11, w, color);
+                    curve(x, y, s, 11, 3, 12.93f, 3, 14.5f, 6.58f, 14.5f, 11, w, color);
+                    curve(x, y, s, 14.5f, 11, 14.5f, 15.42f, 12.93f, 19, 11, 19, w, color);
+                    curve(x, y, s, 11, 19, 9.07f, 19, 7.5f, 15.42f, 7.5f, 11, w, color);
+                    curve(x, y, s, 7.5f, 11, 7.5f, 6.58f, 9.07f, 3, 11, 3, w, color);
+                }
+                case 5 -> { // gear
+                    ringAt(x, y, s, 11, 11, 3.1f, w, color);
+                    line(x, y, s, 11, 2.8f, 11, 4.9f, w, color);
+                    line(x, y, s, 11, 17.1f, 11, 19.2f, w, color);
+                    line(x, y, s, 4.2f, 4.2f, 5.7f, 5.7f, w, color);
+                    line(x, y, s, 16.3f, 16.3f, 17.8f, 17.8f, w, color);
+                    line(x, y, s, 2.8f, 11, 4.9f, 11, w, color);
+                    line(x, y, s, 17.1f, 11, 19.2f, 11, w, color);
+                    line(x, y, s, 4.2f, 17.8f, 5.7f, 16.3f, w, color);
+                    line(x, y, s, 16.3f, 5.7f, 17.8f, 4.2f, w, color);
+                }
+                case 6 -> { // ghost: domed head on a wavy hem
+                    curve(x, y, s, 4, 13, 4, 3.67f, 18, 3.67f, 18, 13, w, color);
+                    line(x, y, s, 4, 13, 4, 18.6f, w, color);
+                    line(x, y, s, 18, 13, 18, 18.6f, w, color);
+                    line(x, y, s, 4, 18.6f, 7.33f, 16.8f, w, color);
+                    line(x, y, s, 7.33f, 16.8f, 11, 18.6f, w, color);
+                    line(x, y, s, 11, 18.6f, 14.67f, 16.8f, w, color);
+                    line(x, y, s, 14.67f, 16.8f, 18, 18.6f, w, color);
+                    dot(x, y, s, 8.5f, 11, 1.15f, color);
+                    dot(x, y, s, 13.5f, 11, 1.15f, color);
+                }
+                case 7 -> { // folder
+                    curve(x, y, s, 3, 6.5f, 3, 5.12f, 4.12f, 4, 5.5f, 4, w, color);
+                    line(x, y, s, 5.5f, 4, 9, 4, w, color);
+                    line(x, y, s, 9, 4, 10.6f, 6, w, color);
+                    line(x, y, s, 10.6f, 6, 18.5f, 6, w, color);
+                    curve(x, y, s, 18.5f, 6, 19.88f, 6, 21, 7.12f, 21, 8.5f, w, color);
+                    line(x, y, s, 21, 8.5f, 21, 16.2f, w, color);
+                    curve(x, y, s, 21, 16.2f, 21, 17.58f, 19.88f, 18.7f, 18.5f, 18.7f, w, color);
+                    line(x, y, s, 18.5f, 18.7f, 5.5f, 18.7f, w, color);
+                    curve(x, y, s, 5.5f, 18.7f, 4.12f, 18.7f, 3, 17.58f, 3, 16.2f, w, color);
+                    line(x, y, s, 3, 16.2f, 3, 6.5f, w, color);
+                }
+                default -> {
+                }
+            }
+        }
+
+        private void line(float x, float y, float s, float x1, float y1, float x2, float y2, float w, int color) {
+            stroke(x + (x1 - 11) * s, y + (y1 - 11) * s, x + (x2 - 11) * s, y + (y2 - 11) * s, w, color);
+        }
+
+        private void ringAt(float x, float y, float s, float cx, float cy, float radius, float w, int color) {
+            ring(x + (cx - 11) * s, y + (cy - 11) * s, radius * s, w, color);
+        }
+
+        private void curve(float x, float y, float s, float x0, float y0, float c1x, float c1y, float c2x, float c2y,
+                           float x1, float y1, float w, int color) {
+            int steps = 12;
+            float px = x + (x0 - 11) * s, py = y + (y0 - 11) * s;
+            for (int i = 1; i <= steps; i++) {
+                float t = (float) i / steps, u = 1 - t;
+                float vx = x + (u * u * u * x0 + 3 * u * u * t * c1x + 3 * u * t * t * c2x + t * t * t * x1 - 11) * s;
+                float vy = y + (u * u * u * y0 + 3 * u * u * t * c1y + 3 * u * t * t * c2y + t * t * t * y1 - 11) * s;
+                stroke(px, py, vx, vy, w, color);
+                px = vx;
+                py = vy;
+            }
+        }
+
+        private void dot(float x, float y, float s, float cx, float cy, float radius, int color) {
+            circle(x + (cx - 11) * s, y + (cy - 11) * s, radius * s, color);
+        }
+    }
+
+    private static int blend(int from, int to, float fraction) {
+        int r = Math.round((from >> 16 & 255) + ((to >> 16 & 255) - (from >> 16 & 255)) * fraction);
+        int g = Math.round((from >> 8 & 255) + ((to >> 8 & 255) - (from >> 8 & 255)) * fraction);
+        int b = Math.round((from & 255) + ((to & 255) - (from & 255)) * fraction);
+        return 0xFF000000 | r << 16 | g << 8 | b;
+    }
+}

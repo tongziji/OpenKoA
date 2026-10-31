@@ -1,0 +1,145 @@
+package client.openkoa.modules.impl.render.nametag;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
+import client.openkoa.event.impl.PacketEvent;
+import client.openkoa.event.impl.Render2DEvent;
+import client.openkoa.event.impl.RenderEvent;
+import client.openkoa.modules.impl.render.NameTags;
+import client.openkoa.modules.impl.world.Teams;
+import client.openkoa.render.FontPresets;
+import client.openkoa.render.FontRenderer;
+import client.openkoa.render.Fonts;
+import client.openkoa.render.GlyphMetrics;
+import client.openkoa.render.Paint;
+import client.openkoa.render.Renderer;
+import client.openkoa.utils.math.MathUtil;
+import client.openkoa.utils.math.Vector2f;
+import client.openkoa.utils.render.ColorUtil;
+import client.openkoa.utils.render.ProjectionUtil;
+
+public class NavenNameTag extends NameTagStyle {
+    private static final int BACKDROP_COLOR = ColorUtil.fromARGB(0, 0, 0, 48);
+    private static final int HEALTH_COLOR = ColorUtil.fromARGB(0, 0, 0, 96);
+    private static final int TEXT_COLOR = 0xCCFFFFFF;
+
+    private static final float PAD_X = 4.0f;
+    private static final float PAD_Y = 2.0f;
+    private static final float TEXT_OFFSET = -1.0f;
+    private static final float HEAD_GAP = 2.0f;
+
+    private final Map<Entity, Vector2f> entityPositions = new ConcurrentHashMap<>();
+    private Paint paint;
+    private FontRenderer cachedFont;
+    private float cachedRasterScale = -1f;
+
+    public NavenNameTag() {
+        super("Naven");
+    }
+
+    @Override
+    public String getName() {
+        return "Naven";
+    }
+
+    @Override
+    public void onEnable() {
+        this.entityPositions.clear();
+    }
+
+    @Override
+    public void onDisable() {
+        this.entityPositions.clear();
+    }
+
+    private void updatePositions(float partialTick) {
+        this.entityPositions.clear();
+        if (mc.level == null || mc.player == null) {
+            return;
+        }
+        double rangeSq = Math.pow(NameTags.INSTANCE.distanceSetting.getValue().doubleValue(), 2.0);
+        for (Entity entity : mc.level.entitiesForRendering()) {
+            if (entity == mc.player || !entity.isAlive()) continue;
+            if (entity.distanceToSqr(mc.player) > rangeSq) continue;
+            if (!(entity instanceof Player)) continue;
+            if (entity.getName().getString().startsWith("CIT-")) continue;
+            if (entity.isInvisible() && !NameTags.INSTANCE.showHealthSetting.getValue()) continue;
+            if (NameTags.INSTANCE.showPingSetting.getValue() && Teams.isSameTeam(entity)) continue;
+            double x = MathUtil.lerp(partialTick, entity.xo, entity.getX());
+            double y = MathUtil.lerp(partialTick, entity.yo, entity.getY()) + entity.getBbHeight() + 0.5;
+            double z = MathUtil.lerp(partialTick, entity.zo, entity.getZ());
+            Vector2f screen = ProjectionUtil.project(x, y, z, partialTick);
+            if (screen == null) continue;
+            screen.setY(screen.getY() - 2.0f);
+            this.entityPositions.put(entity, screen);
+        }
+    }
+
+    @Override
+    public void onRender(RenderEvent renderEvent) {
+        try {
+            this.updatePositions(renderEvent.partialTick());
+        } catch (Exception ignored) {
+        }
+    }
+
+    @Override
+    public void onRender2D(Render2DEvent event) {
+        if (this.entityPositions.isEmpty() || mc.level == null) {
+            return;
+        }
+        float scale = NameTags.INSTANCE.scaleSetting.getValue().floatValue();
+        float rasterScale = Fonts.deviceScale(scale);
+        if (this.cachedFont == null || rasterScale != this.cachedRasterScale) {
+            this.cachedFont = FontPresets.pingfang(32.0f, rasterScale, true);
+            this.cachedRasterScale = rasterScale;
+        }
+        FontRenderer font = this.cachedFont;
+        if (this.paint == null) {
+            this.paint = new Paint();
+        }
+        Renderer.renderConsumer(ctx -> {
+            for (Map.Entry<Entity, Vector2f> entry : this.entityPositions.entrySet()) {
+                if (!(entry.getKey() instanceof Player player)) continue;
+                Vector2f screenPos = entry.getValue();
+                screenPos.set(Math.round(screenPos.x), Math.round(screenPos.y));
+
+                float health = Math.min(player.getHealth(), 20.0f);
+                float ratio = Math.max(0.0f, Math.min(1.0f, health / player.getMaxHealth()));
+                String healthText = String.valueOf(Math.round(health));
+                if (player.getAbsorptionAmount() > 0.0f) {
+                    healthText = healthText + "+" + Math.round(player.getAbsorptionAmount());
+                }
+                String text = player.getName().getString() + " | " + healthText + "HP";
+
+                GlyphMetrics metrics = font.getMetrics();
+                float lineHeight = metrics.getLineHeight();
+                float boxWidth = font.getBounds(text).getWidth() + PAD_X * 2.0f;
+                float boxHeight = PAD_Y * 2.0f + lineHeight;
+                float originX = -boxWidth / 2.0f;
+                float originY = -boxHeight - HEAD_GAP;
+
+                ctx.save();
+                ctx.translate(screenPos.x, screenPos.y);
+                ctx.scale(scale, scale);
+                this.paint.setColor(BACKDROP_COLOR);
+                ctx.drawRectXYWH(originX, originY, boxWidth, boxHeight, this.paint);
+                if (ratio < 1.0f) {
+                    this.paint.setColor(HEALTH_COLOR);
+                    ctx.drawRectXYWH(originX, originY, boxWidth * ratio, boxHeight, this.paint);
+                }
+
+                float textY = originY + TEXT_OFFSET - metrics.ascent() + 1.0f;
+                this.paint.setColor(TEXT_COLOR);
+                ctx.drawString(text, originX + PAD_X, textY, font, this.paint);
+                ctx.restore();
+            }
+        });
+    }
+
+    @Override
+    public void onPacket(PacketEvent packetEvent) {
+    }
+}

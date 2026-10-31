@@ -1,0 +1,69 @@
+# eclipse
+bin
+*.launch
+.settings
+.metadata
+.classpath
+.project
+
+# idea
+out
+*.ipr
+*.iws
+*.iml
+.idea
+
+# gradle
+build
+.gradle
+
+# other
+eclipse
+run
+
+# Files from Forge MDK
+forge*changelog.txt
+
+# Native DLL build artifacts (CMake out-of-source build + staged jar)
+native/build/
+native/openkoa.jar
+
+# Generated at build time by ext.obfuscateJar (holds the obfuscated bridge FQCN)
+native/dll/src/generated_names.h
+changes/
+
+# Claude worktrees
+.claude/worktrees/
+.claude/
+/bash.exe.stackdump
+.workbuddy/
+
+# ============================================================
+# 不得随代码公开的内容（仅存在于本机，公开仓库一律不收录）
+# ============================================================
+
+# 1) 构建产物：加载器 exe、混淆后的 jar、每次混淆都会变的映射表
+build/
+native/build/
+native/openkoa.jar
+build/rename-mapping.txt
+
+# 2) vcpkg 静态依赖树（2.4 GB，Qt6 .lib/.dll，绝不可入库）
+native/vcpkg_installed/
+vcpkg_installed/
+
+# 3) 接管/审计文档：含本机绝对路径、工具链路径与漏洞细节
+HANDOVER.md
+SECURITY-AUDIT.md
+
+# 4) 本地运行态：日志、配置、崩溃转储
+run/
+.openkoa/
+logs/
+*.log
+*.stackdump
+
+# 5) 本机环境脚本（含 C:\WorkSpace 等绝对路径，只留示例）
+scripts/dev-env.ps1
+scripts/*.local.ps1
+openkoa-env.ps1
